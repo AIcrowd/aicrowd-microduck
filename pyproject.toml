@@ -31,3 +31,8 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.uv]
+# onnxruntime 1.24 ships no cp310 wheels. Fork the lock so the 3.10 CI job resolves too; pip does
+# the same on its own, so the published metadata needs no marker.
+constraint-dependencies = ["onnxruntime<1.24; python_version < '3.11'"]
