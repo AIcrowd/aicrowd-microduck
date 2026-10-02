@@ -158,6 +158,19 @@ def test_validate_accepts_an_archive_wrapped_in_a_folder(tmp_path):
     assert main(["validate", str(z)]) == 0
 
 
+def test_validate_explains_a_finder_zip(tmp_path, capsys):
+    """Finder/ditto zips put __MACOSX/ beside the wrapper folder, so the evaluator cannot unwrap it."""
+    d = _submission(tmp_path)
+    z = tmp_path / "finder.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for f in d.iterdir():
+            zf.write(f, arcname=f"my_policy/{f.name}")
+        zf.writestr("__MACOSX/my_policy/._manifest.json", "x")
+    assert main(["validate", str(z), "--json"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["error_code"] == "MANIFEST_INVALID" and "__MACOSX" in out["hint"]
+
+
 # ------------------------------------------------------------------------------------- pack
 def test_pack_puts_files_at_the_root_and_skips_hidden(tmp_path):
     d = _submission(tmp_path)

@@ -77,11 +77,12 @@ def pack(submission_dir: Path, out: Path) -> Path:
     """Zip a submission directory with its files at the archive root.
 
     Same layout as `mdeval pack --zip`: manifest.json must be at the root, because a wrapping folder
-    is the most common way a submission fails to load. Hidden files and __pycache__ are left out.
+    is the most common way a submission fails to load. Hidden files, __pycache__ and __MACOSX are
+    left out.
     """
     files = sorted(
         p for p in submission_dir.rglob("*")
-        if p.is_file() and not any(part.startswith(".") or part == "__pycache__"
+        if p.is_file() and not any(part.startswith(".") or part in ("__pycache__", "__MACOSX")
                                    for part in p.relative_to(submission_dir).parts)
     )
     if not (submission_dir / "manifest.json").is_file():
@@ -153,6 +154,19 @@ def _prepare(path: Path) -> _Prepared:
     raise FileNotFoundError(f"no such file or directory: {path}")
 
 
+def _macosx_hint(archive: Path) -> Optional[str]:
+    """A zip made by Finder or `ditto` holds a __MACOSX/ folder beside the wrapping folder. The
+    evaluator only unwraps a single top-level folder, so it then cannot find manifest.json."""
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            if any(n.startswith("__MACOSX/") for n in zf.namelist()):
+                return ("the archive has a __MACOSX/ folder (macOS Finder adds it). Submit the directory "
+                        "itself, or re-pack it with `aicrowd-microduck pack`.")
+    except (zipfile.BadZipFile, OSError):
+        pass
+    return None
+
+
 def _validate_or_report(path: Path, say: Say, json_output: bool) -> tuple[Optional[_Prepared], Optional[dict], int]:
     """Prepare and check `path`. Returns (prepared, report, exit code); exit code 0 means it passed."""
     from .submission import SubmissionRejected
@@ -167,10 +181,13 @@ def _validate_or_report(path: Path, say: Say, json_output: bool) -> tuple[Option
     try:
         report = check_archive(prepared.path)
     except SubmissionRejected as e:
+        hint = _macosx_hint(prepared.path) if e.code.value == "MANIFEST_INVALID" else None
         prepared.cleanup()
         if json_output:
-            _emit_json({"ok": False, "error": e.message, "error_code": e.code.value})
+            _emit_json({"ok": False, "error": e.message, "error_code": e.code.value, "hint": hint})
         say.warn(f"REJECTED [{e.code.value}] {e.message}")
+        if hint:
+            say.hint(hint)
         return None, None, 1
     return prepared, report, 0
 
