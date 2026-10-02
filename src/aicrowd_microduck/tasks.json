@@ -1,0 +1,156 @@
+{
+ "competition": "microduck-eval-v2",
+ "source": "tasks/competition_v2.yaml",
+ "tasks": [
+  {
+   "task_id": "rough_terrain_v2_e1",
+   "family": "rough_terrain_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "rough_terrain_v2_e2",
+   "family": "rough_terrain_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "rough_terrain_v2_e3",
+   "family": "rough_terrain_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "rough_terrain_v2_e4",
+   "family": "rough_terrain_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_flat",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r3p5",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r5",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r6p5",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r7p25",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r8",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r10",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "roller_descent_v2_r12",
+   "family": "roller_descent_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "jelly_walk_v2_e1",
+   "family": "jelly_walk_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "jelly_walk_v2_e2",
+   "family": "jelly_walk_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "jelly_walk_v2_e3",
+   "family": "jelly_walk_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "jelly_walk_v2_e4",
+   "family": "jelly_walk_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l0",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l1",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l2",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l3",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l4",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l5",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l6",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "flamingo_switch_v2_l7",
+   "family": "flamingo_switch_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "trampoline_height_v2_l1",
+   "family": "trampoline_height_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "trampoline_height_v2_l2",
+   "family": "trampoline_height_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "trampoline_height_v2_l3",
+   "family": "trampoline_height_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "trampoline_height_v2_l4",
+   "family": "trampoline_height_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "trampoline_height_v2_l5",
+   "family": "trampoline_height_v2",
+   "action_scale": 1.0
+  },
+  {
+   "task_id": "trampoline_height_v2_l6",
+   "family": "trampoline_height_v2",
+   "action_scale": 1.0
+  }
+ ]
+}
