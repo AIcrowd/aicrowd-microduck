@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aicrowd-microduck"
-version = "0.1.0"
-description = "Validate, pack and submit policies to the AIcrowd Microduck Sim2Real challenge"
+version = "0.2.0"
+description = "Validate, evaluate, pack and submit policies to the AIcrowd Microduck Sim2Real challenge"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -13,8 +13,14 @@ dependencies = [
     "httpx>=0.27",
     "numpy>=1.24",
     "onnxruntime>=1.17",  # validate runs the evaluator's own smoke inference on every graph
+    "pyyaml>=6.0",        # the competition's task specs (local/competition/*.yaml)
     "toml>=0.10",
 ]
+
+[project.optional-dependencies]
+# `evaluate` simulates: the grader's simulator stack. The Microduck environments themselves come from
+# the starter kit (or any package registering the v2 env ids), which pins the rest of the stack.
+sim = ["mjlab==1.3.0"]
 
 [project.scripts]
 aicrowd-microduck = "aicrowd_microduck.cli:main"

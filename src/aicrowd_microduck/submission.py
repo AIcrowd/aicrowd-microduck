@@ -5,18 +5,33 @@ VENDORED from the evaluator (microduck-evaluator, src/mdeval/common/submission.p
 Only the import of SubmissionErrorCode changed; regenerate with scripts/sync_from_evaluator.py
 rather than editing by hand.
 
-This mirrors what the robot's daemon will load, so a submission that passes here is a submission
-that a real Microduck can run (see ``docs/SIM_VS_ROBOT.md`` for the gaps that remain). The rules
-are deliberately the daemon's, not ours:
+This is **schema 2 of the Microduck policy manifest** — upstream's format, not a format of our own.
+The contract lives in ``pollen-robotics/microduck``, ``docs/policy-manifest.md``, is written by
+``uv run publish`` in ``pollen-robotics/microduck_rl``, and is read by the robot's ``updaterd`` and
+``robotd``. We are a *superset*: everything upstream writes, we accept, plus the task routing a
+competition needs (``policies`` / ``default``). So a submission that scores here is a policy a real
+Microduck can install, and a published Hub policy repo is a valid submission as it stands. See
+``docs/SIM_VS_ROBOT.md`` for the gaps that remain.
+
+The rules are deliberately the daemon's, not ours:
 
 - one graph per task, named by the manifest (by task id, else by the task's family, else ``default``);
-  the input is ``obs`` float32 with trailing dim 61 and the first output is float32 with trailing dim 14;
+  a repo that carries a single ``.onnx`` and routes nothing is that graph for every task, which is
+  how the daemon reads a single-policy repo;
+- the input is ``obs`` float32 with trailing dim 61 and the action output float32 with trailing dim 14;
 - ``model_api`` 1 is feed-forward, 2 adds the explicit LSTM state tensors ``h_in``/``c_in`` ->
-  ``h_out``/``c_out`` with positive static layer and hidden dimensions, identical across all four;
-- tensors are matched by NAME, not by position, and every tensor is float32;
-- the action scale is a property of the evaluation, not of the submission: the manifest must declare
-  the same value the task uses, and a mismatch is rejected rather than silently overridden (the
-  robot's own clamp absorbs a wrong scale without an error, so nothing downstream would catch it).
+  ``h_out``/``c_out`` with positive static layer and hidden dimensions, identical across all four.
+  The numbers are upstream's: a recurrent policy published for the robot declares 2 here too;
+- tensors are matched by NAME, not by position; every tensor is float32; a batch dimension is
+  symbolic or exactly 1; extra tensors are refused, as the daemon refuses them at load;
+- **absent fields are not evidence.** Following upstream, a submission is refused for a claim that
+  is present and wrong, never for a field we do not recognise — otherwise every field upstream adds
+  to its own manifest would break submissions here;
+- the action scale is the one place we are stricter, and deliberately: upstream treats
+  ``action_scale`` as a property of the policy, but here it is a property of the *evaluation*. The
+  manifest must declare the value the task uses, and a mismatch is rejected rather than silently
+  overridden (the robot's own clamp absorbs a wrong scale without an error, so nothing downstream
+  would catch it).
 
 Validation runs in the trusted worker before anything is loaded for real, and the same code backs
 ``mdeval validate`` so a participant sees the identical verdict locally.
@@ -46,7 +61,10 @@ class SubmissionErrorCode(str, Enum):
     ACTION_SCALE_MISMATCH = "ACTION_SCALE_MISMATCH"      # manifest disagrees with the task's fixed scale
     SETUP_FAILED = "SETUP_FAILED"
 
-SCHEMA_VERSION = 1
+# Upstream's schema version. 2 is a superset of 1 and upstream's own rule is that nothing gates on
+# it, so we accept either and write 2.
+SCHEMA_VERSION = 2
+SCHEMA_VERSIONS_ACCEPTED = (1, 2)
 MODEL_API_FEEDFORWARD = 1
 MODEL_API_RECURRENT = 2
 OBS_LEN = 61
@@ -56,7 +74,27 @@ OBS_INPUT = "obs"
 STATE_IN = ("h_in", "c_in")
 STATE_OUT = ("h_out", "c_out")
 
+# What the robot this challenge is for actually is. Upstream refuses a policy whose manifest claims
+# another robot; so do we, because such a submission is a mistake rather than a bad policy.
+ROBOT_MODEL = "microduck"
+CONTROL_HZ = 50
+
 MAX_GRAPH_BYTES = 200 * 1024 * 1024
+# Per upstream's recurrent-policy contract: each state tensor is capped at 2**20 elements. A graph
+# over it loads here and is refused on the robot, which is the one outcome this format exists to
+# prevent.
+MAX_STATE_ELEMENTS = 1_048_576
+
+# Fields of upstream schema 2 that describe a policy rather than route one. We keep them verbatim so
+# a submission can be republished as a Hub policy repo without losing anything, and so an organizer
+# can see what a participant declared. None of them change how a submission is scored.
+#
+# `policy-manifest.md` calls these display-or-skill fields; the daemon reads some of them when it
+# installs a skill, and we are not the daemon. Carried, not interpreted.
+PASSTHROUGH_FIELDS = (
+    "kind", "slot", "robot", "training", "eval", "command", "duration_s", "chain",
+    "unwind_s", "ramp_s", "entry_pose", "mode",
+)
 
 
 class SubmissionRejected(Exception):
@@ -80,6 +118,13 @@ class PolicyManifest:
     action_len: int = ACT_LEN
     name: str = ""
     description: str = ""
+    #: Upstream schema-2 fields the participant declared, carried verbatim and not interpreted here
+    #: (see ``PASSTHROUGH_FIELDS``). Kept so a scored submission can be republished as a Hub policy
+    #: repo unchanged, and so an organizer can see what was claimed.
+    declared: dict[str, Any] = field(default_factory=dict)
+    #: Keys we did not recognise at all. Not a rejection — upstream's rule is that an unknown field
+    #: is not evidence — but worth naming back to a participant whose routing key was a typo.
+    unknown_keys: tuple[str, ...] = ()
 
     def graph_for(self, task_id: str, family: str | None = None) -> str:
         """The graph for a task: its task id, else its family (v2 levels share one), else ``default``."""
@@ -95,13 +140,82 @@ class PolicyManifest:
         return sorted(dict.fromkeys(seen))
 
     def to_dict(self) -> dict[str, Any]:
+        """The round-trip form: every key is a constructor argument, because the worker rebuilds the
+        manifest from this across a process boundary. For a publishable manifest use
+        :meth:`to_manifest_json`."""
         return {"schema_version": self.schema_version, "model_api": self.model_api, "obs_len": self.obs_len,
                 "action_len": self.action_len, "action_scale": self.action_scale, "policies": dict(self.policies),
-                "default": self.default, "name": self.name, "description": self.description}
+                "default": self.default, "name": self.name, "description": self.description,
+                "declared": dict(self.declared), "unknown_keys": tuple(self.unknown_keys)}
+
+    def to_manifest_json(self) -> dict[str, Any]:
+        """A ``manifest.json`` conforming to upstream schema 2, so what we write is directly
+        publishable as a Hub policy repo (``robotctl policy load <slot> <repo>``).
+
+        ``policies``/``default`` ride along as the routing extension: upstream ignores fields it does
+        not read, which is exactly the property that lets one file serve both.
+        """
+        out: dict[str, Any] = {
+            "schema_version": SCHEMA_VERSION,
+            "model_api": self.model_api,
+            "obs_len": self.obs_len,
+            "action_len": self.action_len,
+            "robot": {"model": ROBOT_MODEL, "hw_rev": 1, "servos": "xl330", "control_hz": CONTROL_HZ},
+            "action_scale": self.action_scale,
+        }
+        out.update({k: v for k, v in self.declared.items() if k != "robot"})
+        if "robot" in self.declared and isinstance(self.declared["robot"], dict):
+            out["robot"] = {**out["robot"], **self.declared["robot"]}
+        if self.name:
+            out["name"] = self.name
+        if self.description:
+            out["description"] = self.description
+        if self.policies:
+            out["policies"] = dict(self.policies)
+        if self.default:
+            out["default"] = self.default
+        return out
 
 
 def _reject(msg: str, code: SubmissionErrorCode = SubmissionErrorCode.MANIFEST_INVALID) -> "SubmissionRejected":
     return SubmissionRejected(code, msg)
+
+
+def _as_int(data: dict[str, Any], key: str, default: int) -> int:
+    """An integer claim, or a participant-facing rejection. ``int("2.0")`` raises, and an unhandled
+    ValueError here would surface as an evaluator crash rather than as a bad manifest."""
+    if key not in data or data[key] is None:
+        return default
+    try:
+        return int(data[key])
+    except (TypeError, ValueError) as e:
+        raise _reject(f"{key} must be an integer: {data[key]!r}") from e
+
+
+def _routing_table(policies: Any) -> dict[str, str]:
+    """``policies`` in either upstream shape.
+
+    Ours is an object, ``task_id or family -> file``. Upstream's "official set" is an *array* of
+    entries, each a ``file`` plus per-policy fields; there the entry's ``name`` is what a client asks
+    for, so that is the routing key (falling back to the file's stem, as upstream does). Accepting
+    both means a participant can hand us either shape and neither needs converting.
+    """
+    if isinstance(policies, dict):
+        if not all(isinstance(k, str) for k in policies):
+            raise _reject("'policies' keys must be strings (a task id or a task family)")
+        return {k: str(v) for k, v in policies.items()}
+    if isinstance(policies, list):
+        table: dict[str, str] = {}
+        for i, entry in enumerate(policies):
+            if not isinstance(entry, dict) or not entry.get("file"):
+                raise _reject(f"'policies'[{i}] must be an object with a 'file' (upstream's policy-set shape)")
+            file = str(entry["file"])
+            # Upstream's seeder *skips* a malformed entry; we reject it. Silently dropping a policy
+            # would change what a participant is scored on without telling them.
+            table[str(entry.get("name") or Path(file).stem)] = file
+        return table
+    raise _reject("'policies' must be an object (task_id or family -> onnx file) or an array of "
+                  "{file, name} entries")
 
 
 def _safe_relpath(value: str, directory: Path) -> Path:
@@ -130,19 +244,24 @@ def load_manifest(directory: str | Path) -> PolicyManifest:
     if not isinstance(data, dict):
         raise _reject("manifest.json must be a JSON object")
 
-    unknown = set(data) - set(PolicyManifest().to_dict())
-    if unknown:
-        raise _reject(f"unknown manifest keys {sorted(unknown)}; allowed: {sorted(PolicyManifest().to_dict())}")
-
+    # Upstream's rule, adopted verbatim: "absent fields are not evidence: a robot refuses a policy
+    # only on a claim that is present and wrong". So an unrecognised key is carried, not rejected --
+    # otherwise every field upstream adds to schema 2 would break submissions here, and a policy
+    # published with `uv run publish` would be refused for describing itself.
+    known = set(PolicyManifest().to_dict()) | set(PASSTHROUGH_FIELDS)
     m = PolicyManifest()
-    m.schema_version = int(data.get("schema_version", SCHEMA_VERSION))
-    if m.schema_version != SCHEMA_VERSION:
-        raise _reject(f"schema_version {m.schema_version} is not supported (this evaluator speaks {SCHEMA_VERSION})")
-    m.model_api = int(data.get("model_api", MODEL_API_FEEDFORWARD))
+    m.unknown_keys = tuple(sorted(set(data) - known))
+    m.declared = {k: data[k] for k in PASSTHROUGH_FIELDS if k in data}
+
+    m.schema_version = _as_int(data, "schema_version", SCHEMA_VERSION)
+    if m.schema_version not in SCHEMA_VERSIONS_ACCEPTED:
+        raise _reject(f"schema_version {m.schema_version} is not supported (this evaluator speaks "
+                      f"{' and '.join(str(v) for v in SCHEMA_VERSIONS_ACCEPTED)} of the Microduck policy manifest)")
+    m.model_api = _as_int(data, "model_api", MODEL_API_FEEDFORWARD)
     if m.model_api not in (MODEL_API_FEEDFORWARD, MODEL_API_RECURRENT):
         raise _reject(f"model_api {m.model_api} is not supported (1 = feed-forward, 2 = LSTM)")
-    m.obs_len = int(data.get("obs_len", OBS_LEN))
-    m.action_len = int(data.get("action_len", ACT_LEN))
+    m.obs_len = _as_int(data, "obs_len", OBS_LEN)
+    m.action_len = _as_int(data, "action_len", ACT_LEN)
     if m.obs_len != OBS_LEN or m.action_len != ACT_LEN:
         raise _reject(f"obs_len/action_len must be {OBS_LEN}/{ACT_LEN}, got {m.obs_len}/{m.action_len}")
     try:
@@ -150,13 +269,41 @@ def load_manifest(directory: str | Path) -> PolicyManifest:
     except (TypeError, ValueError) as e:
         raise _reject(f"action_scale must be a number: {data.get('action_scale')!r}") from e
 
-    policies = data.get("policies", {})
-    if not isinstance(policies, dict) or not all(isinstance(k, str) for k in policies):
-        raise _reject("'policies' must be an object mapping task_id or family -> onnx file")
-    m.policies = {k: str(v) for k, v in policies.items()}
+    # `robot.model` is a claim, so a wrong one is refused -- exactly where the daemon refuses it.
+    # The rest of the block (hw_rev, servos, control_hz) is upstream's display data; we carry it.
+    robot = data.get("robot")
+    if isinstance(robot, dict) and robot.get("model") not in (None, ROBOT_MODEL):
+        raise _reject(f"robot.model is {robot.get('model')!r}; this challenge evaluates {ROBOT_MODEL!r}")
+
+    # Upstream lets a set's entry carry its own `action_scale`, because there a scale belongs to the
+    # policy. Here it belongs to the task, so an entry declaring a different one cannot be honoured --
+    # and quietly ignoring it would score the policy at a scale its author did not choose, which is
+    # the exact silent failure the top-level check below exists to prevent.
+    raw_policies = data.get("policies", {})
+    if isinstance(raw_policies, list):
+        for i, entry in enumerate(raw_policies):
+            if isinstance(entry, dict) and entry.get("action_scale") is not None \
+                    and abs(float(entry["action_scale"]) - m.action_scale) > 1e-9:
+                raise SubmissionRejected(
+                    SubmissionErrorCode.ACTION_SCALE_MISMATCH,
+                    f"'policies'[{i}] declares action_scale {entry['action_scale']} but the manifest declares "
+                    f"{m.action_scale}. The scale is fixed by the task, so it cannot differ per policy; fold "
+                    "the difference into that graph's output layer instead.")
+    m.policies = _routing_table(raw_policies)
     m.default = str(data["default"]) if data.get("default") else None
     if not m.policies and not m.default:
-        raise _reject("manifest names no policy: set 'policies' (task_id or family -> file) and/or 'default'")
+        # A single-policy repo routes nothing and carries one `policy.onnx`. The daemon "takes the
+        # sole `.onnx` in a repo and refuses several", so that graph is the policy for every task
+        # and this is a complete submission rather than an incomplete one.
+        lone = sorted(p.name for p in d.glob("*.onnx"))
+        if len(lone) == 1:
+            m.default = lone[0]
+        else:
+            where = (f"the submission has {len(lone)} .onnx files ({', '.join(lone)}), so one of them has "
+                     "to be named" if lone else "the submission has no .onnx file")
+            hint = f" (unrecognised key(s) {list(m.unknown_keys)} -- a typo?)" if m.unknown_keys else ""
+            raise _reject(f"manifest names no policy and {where}: set 'policies' (task_id or family -> file) "
+                          f"and/or 'default'{hint}")
     for value in m.graph_files():
         full = _safe_relpath(value, d)
         if not full.is_file():
@@ -221,24 +368,43 @@ def inspect_graph(path: str | Path, model_api: int, session=None) -> GraphSignat
 
     inputs = {i.name: i for i in sess.get_inputs()}
     outputs = list(sess.get_outputs())
+    out_names = {o.name for o in outputs}
     if OBS_INPUT not in inputs:
         raise bad(f"no input named {OBS_INPUT!r} (inputs: {sorted(inputs)}); tensors are matched by name")
     for tensor in (*inputs.values(), *outputs):
         if tensor.type != "tensor(float)":
             raise bad(f"tensor {tensor.name!r} is {tensor.type}, every tensor must be float32")
 
-    obs_shape = inputs[OBS_INPUT].shape
-    if _static(_dim(obs_shape, len(obs_shape) - 1)) != OBS_LEN:
-        raise bad(f"input 'obs' has shape {obs_shape}, the trailing dimension must be {OBS_LEN}")
-    act = outputs[0]
-    if _static(_dim(act.shape, len(act.shape) - 1)) != ACT_LEN:
-        raise bad(f"first output {act.name!r} has shape {act.shape}, the trailing dimension must be {ACT_LEN}")
-    dynamic_batch = _is_dynamic(_dim(obs_shape, 0)) if len(obs_shape) > 1 else False
+    # A graph that carries state either way is a recurrent graph, including one that returns state
+    # without accepting it -- that one is caught below as a missing input, which is what it is.
+    recurrent = any(n in inputs for n in STATE_IN) or any(n in out_names for n in STATE_OUT)
 
-    recurrent = any(n in inputs for n in STATE_IN)
+    # "Unsupported names, ranks, types, widths and extra tensors fail at load." A graph with a
+    # tensor the daemon does not know is refused there, so it is refused here: accepting it would
+    # score a policy that cannot be installed.
+    extra_in = sorted(set(inputs) - {OBS_INPUT} - (set(STATE_IN) if recurrent else set()))
+    if extra_in:
+        raise bad(f"unexpected input(s) {extra_in}; the contract is "
+                  f"{'obs, h_in, c_in' if recurrent else 'obs'} and nothing else")
+    action_outs = [o for o in outputs if o.name not in STATE_OUT]
+    if len(action_outs) != 1:
+        raise bad(f"expected exactly one action output, got {sorted(o.name for o in action_outs)}; a graph with "
+                  "extra outputs is refused at load on the robot (export the actor alone, not the critic)")
+    act = action_outs[0]
+
+    obs_shape = inputs[OBS_INPUT].shape
+    if len(obs_shape) != 2 or _static(_dim(obs_shape, 1)) != OBS_LEN:
+        raise bad(f"input 'obs' has shape {obs_shape}, it must be [batch, {OBS_LEN}]")
+    if len(act.shape) != 2 or _static(_dim(act.shape, 1)) != ACT_LEN:
+        raise bad(f"output {act.name!r} has shape {act.shape}, it must be [batch, {ACT_LEN}]")
+    obs_batch = _dim(obs_shape, 0)
+    if not _is_dynamic(obs_batch) and _static(obs_batch) != 1:
+        raise bad(f"input 'obs' has a fixed batch of {obs_batch}; inference always uses one robot, so the batch "
+                  "dimension must be symbolic or exactly 1")
+    dynamic_batch = _is_dynamic(obs_batch)
+
     layers = hidden = 0
     if recurrent:
-        out_names = {o.name for o in outputs}
         missing = [n for n in (*STATE_IN, *STATE_OUT) if n not in (set(inputs) | out_names)]
         if missing:
             raise bad(f"recurrent graph is missing {missing}; the contract is obs, h_in, c_in -> actions, h_out, c_out")
@@ -255,8 +421,15 @@ def inspect_graph(path: str | Path, model_api: int, session=None) -> GraphSignat
         if None in hidden_dims or len(hidden_dims) != 1:
             raise bad(f"hidden width must be one positive static value across all state tensors, got {hidden_dims}")
         layers, hidden = layer_dims.pop(), hidden_dims.pop()
-    elif model_api == MODEL_API_RECURRENT and any(n in {o.name for o in outputs} for n in STATE_OUT):
-        raise bad("graph returns LSTM state but does not accept it as input")
+        if layers * hidden > MAX_STATE_ELEMENTS:
+            raise bad(f"each state tensor holds {layers}x{hidden} = {layers * hidden} elements, over the "
+                      f"{MAX_STATE_ELEMENTS} the robot's runtime allows")
+        # The batched path feeds one state tensor for every parallel episode at once, so a graph
+        # whose state batch is pinned to 1 has to be driven one episode at a time even when `obs`
+        # would take them all. Getting this wrong is a runtime shape error mid-rollout, not a
+        # rejection, so it is settled here instead.
+        if dynamic_batch and not all(_is_dynamic(_dim(s, 1)) for s in shapes):
+            dynamic_batch = False
 
     return GraphSignature(file=name, dynamic_batch=dynamic_batch, recurrent=recurrent, layers=layers,
                           hidden=hidden, action_output=act.name)
@@ -293,7 +466,10 @@ def smoke_run(path: str | Path, sig: GraphSignature, session=None) -> dict[str, 
     if sig.recurrent:
         zeros = np.zeros((sig.layers, 1, sig.hidden), dtype=np.float32)
         feeds_extra = {STATE_IN[0]: zeros, STATE_IN[1]: zeros.copy()}
-    out_names = [sig.action_output]
+    # Ask for the state back as well, and feed it forward: this mirrors the robot's warm-up, which
+    # runs the actor from zeroed memory and rejects invalid or non-finite outputs before committing
+    # either state. A graph whose memory diverges is refused there, so it is refused here.
+    out_names = [sig.action_output] + (list(STATE_OUT) if sig.recurrent else [])
     rows = []
     for i in range(obs.shape[0]):
         try:
@@ -308,6 +484,16 @@ def smoke_run(path: str | Path, sig: GraphSignature, session=None) -> dict[str, 
         if not np.all(np.isfinite(a)):
             raise SubmissionRejected(SubmissionErrorCode.ONNX_OUTPUT_INVALID,
                                      f"{name}: produced a non-finite action on a plausible observation")
+        if sig.recurrent:
+            h, c = (np.asarray(res[1], dtype=np.float32), np.asarray(res[2], dtype=np.float32))
+            for tensor, label in ((h, STATE_OUT[0]), (c, STATE_OUT[1])):
+                if not np.all(np.isfinite(tensor)):
+                    raise SubmissionRejected(
+                        SubmissionErrorCode.ONNX_OUTPUT_INVALID,
+                        f"{name}: returned a non-finite {label} on a plausible observation. The robot's "
+                        "runtime clears memory and refuses the step when this happens, so the policy would "
+                        "stop controlling the robot")
+            feeds_extra = {STATE_IN[0]: h, STATE_IN[1]: c}
         rows.append(a)
     stacked = np.stack(rows)
     if np.allclose(stacked, stacked[0], atol=0.0, rtol=0.0):

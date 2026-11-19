@@ -1,0 +1,38 @@
+# Trampoline Height v2, level L2: mat solref (-300, -4.0). The level lives in the env
+# (microduck_rl_training src/mjlab_microduck/tasks/v2/trampoline_height.py LEVELS).
+# Score: trunk_rise_score = mean over the 8 envs of max(0, highest trunk z from 1 s to the done step - 0.1088 m)
+# / 0.1 m, uncapped (docs/tasks/trampoline_height.md §3; metrics_v2/trampoline_height.py).
+task_id: trampoline_height_v2_l2
+family: trampoline_height_v2
+env_id: Mjlab-TrampolineHeightV2-L2-MicroDuck
+description: "Trampoline height L2 (K300, D4.0): get the trunk as high as possible in 10 s."
+num_rollouts: 1
+num_envs: 8
+episode_length_s: 10.0
+seed_mode: secret
+action_scale: 1.0
+step_deadline_s: 1.0
+max_step_timeouts: 10
+record_after_done_s: 0.5
+metrics: [episode_length, survival, termination_reasons, reward_terms, trunk_height, env_metrics,
+          trampoline_bounce, trampoline_height]
+primary_metric: trunk_rise_score
+higher_is_better: true
+eval_overrides:
+  disable_curriculum: true
+  terrain_rows: null
+  terrain_cols: null
+  terrain_curriculum: null
+  disable_pushes: false
+  disable_obs_noise: false
+  disable_domain_randomization: false
+render:
+  enabled: true
+  env_ids: [0]
+  fps: 20
+  width: 480
+  height: 270
+  shadows: false
+  scene: trampoline      # render-only: mat on a frame that dips under the feet (server/decor.py)
+  camera_distance: 1.0   # with the 1.5 m deck: the rim and the mat's rings in frame, the duck ~3/4 its old size
+  camera_elevation: -30.0

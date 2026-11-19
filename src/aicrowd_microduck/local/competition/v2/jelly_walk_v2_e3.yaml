@@ -1,0 +1,34 @@
+# Jelly Walk v2, level E3 = ladder L5 (docs/tasks/jelly_walk.md §5): flat soft floor, solref (-80, -20),
+# solimp (0.6, 0.9, 0.01, 0.5, 2.0), floor priority 2; pushes 0.3 m/s every 3-6 s.
+# The floor (scene.spec_fn) and the pushes are baked into the env; no override here touches them.
+task_id: jelly_walk_v2_e3             # also the secret-seed key: HMAC(task_id:i)
+family: jelly_walk_v2
+env_id: Mjlab-JellyWalkV2-E3-MicroDuck
+description: "Track the commanded planar velocity on a soft floor (E3: solref (-80, -20), pushes 0.3 m/s every 3-6 s)."
+num_rollouts: 12
+num_envs: 8
+episode_length_s: 10.0
+seed_mode: secret
+action_scale: 1.0
+step_deadline_s: 1.0
+max_step_timeouts: 10
+record_after_done_s: 0.5               # recording stops 0.5 s after the last fall (docs/tasks/README.md)
+metrics: [episode_length, survival, termination_reasons, reward_terms, velocity_tracking, trunk_height, env_metrics, command_progress]
+primary_metric: command_progress_score
+higher_is_better: true
+eval_overrides:
+  disable_curriculum: true
+  terrain_rows: null                   # the flat plane has no generator, so these are no-ops; null by convention
+  terrain_cols: null
+  terrain_curriculum: null
+  disable_pushes: false                # true would delete push_robot, which is part of every level (E4 especially)
+  disable_obs_noise: false
+  disable_domain_randomization: false  # true also deletes push_robot
+render:
+  enabled: true
+  scene: foam                          # render-only foam block (server/decor.py); "auto" matches only v1 SoftFloor ids
+  env_ids: [0]
+  fps: 20
+  width: 480
+  height: 270
+  shadows: false

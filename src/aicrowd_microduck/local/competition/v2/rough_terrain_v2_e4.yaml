@@ -1,0 +1,35 @@
+# Rough Terrain v2, level E4 (docs/tasks/rough_terrain.md §5.2). LMAX difficulty d in 0.80-1.00:
+# steps 3.2-4.0 cm up / 4.0-5.0 cm down, cobbles +/-1.6-2.0 cm, slopes 22-27 deg.
+# The env bakes in its terrain: a 1 x 4 curriculum layout, one 8 m patch per type in column order
+# (down-stairs, up-stairs, cobbles, slope), 8 envs split 2/2/2/2. The null terrain overrides keep it.
+task_id: rough_terrain_v2_e4          # also the secret-seed key: HMAC(task_id:i)
+family: rough_terrain_v2
+env_id: Mjlab-RoughTerrainV2-E4-MicroDuck
+description: "Track the commanded planar velocity while walking over rough terrain (level E4, d 0.80-1.00)."
+num_rollouts: 12
+num_envs: 8
+episode_length_s: 10.0
+seed_mode: secret
+action_scale: 1.0
+step_deadline_s: 1.0
+max_step_timeouts: 10
+record_after_done_s: 0.5               # recording stops 0.5 s after the last fall (docs/tasks/README.md)
+metrics: [episode_length, survival, termination_reasons, reward_terms, velocity_tracking, trunk_height, command_progress]
+primary_metric: command_progress_score
+higher_is_better: true
+eval_overrides:
+  disable_curriculum: true
+  terrain_rows: null                   # null = keep the baked-in layout (1 row x 4 columns, curriculum on)
+  terrain_cols: null
+  terrain_curriculum: null
+  disable_pushes: false
+  disable_obs_noise: false
+  disable_domain_randomization: false
+render:
+  enabled: true
+  scene: terrain                       # render-only muted palette (server/terrain_decor.py)
+  env_ids: [0, 2, 4, 6]                # one env per terrain type
+  fps: 20
+  width: 480
+  height: 270
+  shadows: false

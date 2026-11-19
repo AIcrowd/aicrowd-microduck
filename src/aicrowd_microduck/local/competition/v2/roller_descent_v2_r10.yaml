@@ -1,0 +1,27 @@
+# Roller Descent v2, level r10 (10 deg ramp; entry speed 0.3 m/s). docs/tasks/roller_descent.md.
+# The level is baked into the env (one course tile, spawn, entry, terminations); the yamls differ only in task_id,
+# env_id and description. Score: descent_score over 0-3.5 s, mean of S over the 4 envs (no band weights).
+task_id: roller_descent_v2_r10
+family: roller_descent_v2
+env_id: Mjlab-RollerDescentV2-R10-MicroDuck
+description: "Roll down a 10 deg ramp crouched, keep the speed the slope gives, stay in lane."
+num_rollouts: 3                     # 3 x 4 = 12 episodes
+num_envs: 4
+episode_length_s: 4.5               # the score reads 0-3.5 s
+seed_mode: secret
+action_scale: 1.0
+step_deadline_s: 1.0
+max_step_timeouts: 10
+record_after_done_s: 0.5            # v2: recording stops 0.5 s after the last fall
+metrics: [episode_length, survival, termination_reasons, descent_score]
+primary_metric: descent_score
+higher_is_better: true
+eval_overrides:
+  disable_curriculum: true
+  terrain_rows: null                # keep the baked-in single course (the defaults would build 2 x 3 tiles)
+  terrain_cols: null
+  terrain_curriculum: null
+  disable_pushes: false
+  disable_obs_noise: false
+  disable_domain_randomization: false
+render: {enabled: true, scene: roller, env_ids: [0], fps: 20, width: 480, height: 270, shadows: false}

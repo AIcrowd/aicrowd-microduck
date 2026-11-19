@@ -1,0 +1,78 @@
+# Microduck v2: one evaluator task per ladder level, grouped into five families (docs/tasks/README.md).
+# Weight = 0.2 x the level's weight within its family, so every family sums to 0.2 and the session score is the
+# weighted mean over all 30 levels. report.json also carries one score per family: sum(w * level) / sum(w).
+# The level yamls live in tasks/v2/<task_id>.yaml; each carries `family: <family>`.
+name: microduck-eval-v2
+description: "Five-family Microduck evaluation, one task per difficulty level: rough terrain, roller descent, jelly walk, flamingo switch, trampoline height."
+tasks:
+  # Rough Terrain (rough_terrain_v2)
+  - v2/rough_terrain_v2_e1.yaml
+  - v2/rough_terrain_v2_e2.yaml
+  - v2/rough_terrain_v2_e3.yaml
+  - v2/rough_terrain_v2_e4.yaml
+  # Roller Descent (roller_descent_v2)
+  - v2/roller_descent_v2_flat.yaml
+  - v2/roller_descent_v2_r3p5.yaml
+  - v2/roller_descent_v2_r5.yaml
+  - v2/roller_descent_v2_r6p5.yaml
+  - v2/roller_descent_v2_r7p25.yaml
+  - v2/roller_descent_v2_r8.yaml
+  - v2/roller_descent_v2_r10.yaml
+  - v2/roller_descent_v2_r12.yaml
+  # Jelly Walk (jelly_walk_v2)
+  - v2/jelly_walk_v2_e1.yaml
+  - v2/jelly_walk_v2_e2.yaml
+  - v2/jelly_walk_v2_e3.yaml
+  - v2/jelly_walk_v2_e4.yaml
+  # Flamingo Switch (flamingo_switch_v2)
+  - v2/flamingo_switch_v2_l0.yaml
+  - v2/flamingo_switch_v2_l1.yaml
+  - v2/flamingo_switch_v2_l2.yaml
+  - v2/flamingo_switch_v2_l3.yaml
+  - v2/flamingo_switch_v2_l4.yaml
+  - v2/flamingo_switch_v2_l5.yaml
+  - v2/flamingo_switch_v2_l6.yaml
+  - v2/flamingo_switch_v2_l7.yaml
+  # Trampoline Height (trampoline_height_v2)
+  - v2/trampoline_height_v2_l1.yaml
+  - v2/trampoline_height_v2_l2.yaml
+  - v2/trampoline_height_v2_l3.yaml
+  - v2/trampoline_height_v2_l4.yaml
+  - v2/trampoline_height_v2_l5.yaml
+  - v2/trampoline_height_v2_l6.yaml
+weights:
+  # Rough Terrain: sums to 0.2
+  rough_terrain_v2_e1: 0.05
+  rough_terrain_v2_e2: 0.05
+  rough_terrain_v2_e3: 0.05
+  rough_terrain_v2_e4: 0.05
+  # Roller Descent: sums to 0.2
+  roller_descent_v2_flat: 0.02
+  roller_descent_v2_r3p5: 0.02
+  roller_descent_v2_r5: 0.02
+  roller_descent_v2_r6p5: 0.02
+  roller_descent_v2_r7p25: 0.02
+  roller_descent_v2_r8: 0.02
+  roller_descent_v2_r10: 0.04
+  roller_descent_v2_r12: 0.04
+  # Jelly Walk: sums to 0.2
+  jelly_walk_v2_e1: 0.05
+  jelly_walk_v2_e2: 0.05
+  jelly_walk_v2_e3: 0.05
+  jelly_walk_v2_e4: 0.05
+  # Flamingo Switch: sums to 0.2
+  flamingo_switch_v2_l0: 0.0125
+  flamingo_switch_v2_l1: 0.0125
+  flamingo_switch_v2_l2: 0.025
+  flamingo_switch_v2_l3: 0.0375
+  flamingo_switch_v2_l4: 0.0375
+  flamingo_switch_v2_l5: 0.025
+  flamingo_switch_v2_l6: 0.025
+  flamingo_switch_v2_l7: 0.025
+  # Trampoline Height: sums to 0.2
+  trampoline_height_v2_l1: 0.03333333333333333
+  trampoline_height_v2_l2: 0.03333333333333333
+  trampoline_height_v2_l3: 0.03333333333333333
+  trampoline_height_v2_l4: 0.03333333333333333
+  trampoline_height_v2_l5: 0.03333333333333333
+  trampoline_height_v2_l6: 0.03333333333333333

@@ -1,4 +1,4 @@
-"""`aicrowd-microduck`: validate, pack and submit Microduck policies to AIcrowd.
+"""`aicrowd-microduck`: validate, evaluate, pack and submit Microduck policies to AIcrowd.
 
 Submitting talks to the AIcrowd Rails API directly (identity, eligibility, presign, S3 upload,
 create), the same path `whest submit` uses. It does not go through aicrowd-cli or api.aicrowd.com.
@@ -239,6 +239,111 @@ def cmd_validate(args, say: Say) -> int:
     return 0
 
 
+def _local_competition_path() -> Path:
+    return Path(__file__).parent / "local" / "competition" / "competition_v2.yaml"
+
+
+_SIM_HINT = ("`evaluate` simulates your policy, so it needs the simulator and the Microduck environments: "
+             "install the starter kit (it brings both), or `pip install \"aicrowd-microduck[sim]\"` plus the "
+             "Microduck environment package.")
+
+
+def _check_simulator(env_id: str) -> Optional[str]:
+    """None if ``env_id`` can be built here, else what is missing (checked before spawning any rollout)."""
+    try:
+        import mujoco  # noqa: F401
+        import yaml  # noqa: F401
+        from mjlab.tasks.registry import load_env_cfg
+    except ImportError as e:
+        return f"{e.name or e} is not installed"
+    from .local.env_runner import _ensure_tasks_registered
+
+    _ensure_tasks_registered()
+    try:
+        load_env_cfg(env_id, play=False)
+    except Exception as e:  # noqa: BLE001
+        return f"environment {env_id!r} is not registered ({type(e).__name__}: {e})"
+    return None
+
+
+def cmd_evaluate(args, say: Say) -> int:
+    """Score a submission locally with the grader's own simulation, policy runner and metrics."""
+    import shutil
+
+    path = Path(args.path)
+    out = Path(args.out)
+    comp_path = Path(args.competition) if args.competition else _local_competition_path()
+    try:
+        from .local.local_eval import DEFAULT_LOCAL_SEED_SECRET, evaluate_local, select_tasks
+        from .local.tasks import load_competition
+    except ImportError as e:
+        say.warn(f"cannot load the local scorer: {e}")
+        say.hint(_SIM_HINT)
+        return 2
+    from .submission import SubmissionRejected
+
+    comp = load_competition(comp_path)
+    try:
+        tasks = select_tasks(comp, args.only.split(",") if args.only else None)
+    except ValueError as e:
+        say.warn(str(e))
+        return 2
+    missing = _check_simulator(tasks[0].env_id)
+    if missing:
+        say.warn(f"cannot simulate: {missing}")
+        say.hint(_SIM_HINT)
+        return 2
+
+    sub_dir = path
+    if path.is_file():
+        from .ingestion import extract
+
+        sub_dir = out / "submission"
+        if sub_dir.exists():
+            shutil.rmtree(sub_dir)
+        try:
+            sub_dir = extract(path, sub_dir)
+        except SubmissionRejected as e:
+            say.warn(f"Rejected [{e.code.value}] {e.message}")
+            return 1
+    n_roll = sum(min(t.num_rollouts, args.num_rollouts or t.num_rollouts) for t in tasks)
+    say.step(f"Evaluating {len(tasks)} task(s), {n_roll} rollout(s), {args.jobs} at a time -> {out}")
+
+    def progress(r: dict[str, Any], n: int, total: int) -> None:
+        prim = (r.get("metrics") or {}).get("primary")
+        tail = f"{prim:.4f}" if isinstance(prim, (int, float)) else f"{r['state']} [{r.get('error_code')}]"
+        say.hint(f"[{n}/{total}] {r['rollout_id']:<32} {tail}")
+
+    try:
+        report = evaluate_local(sub_dir, comp, out, only=args.only.split(",") if args.only else None,
+                                jobs=args.jobs, seed_secret=args.seed_secret, num_rollouts=args.num_rollouts,
+                                on_result=progress)
+    except SubmissionRejected as e:
+        if args.json:
+            _emit_json({"ok": False, "error_code": e.code.value, "message": e.message})
+        say.warn(f"Rejected [{e.code.value}] {e.message}")
+        return 1
+    if args.json:
+        _emit_json({"ok": True, **{k: report[k] for k in ("score", "families", "partial", "state")},
+                    "tasks": {t["task_id"]: t["score"] for t in report["tasks"]},
+                    "report": str(out / "report.json")})
+    say.ok(f"Score {report['score']:.4f}" + ("  (partial: not every task or rollout was run)" if report["partial"] else ""))
+    for fam, f in report["families"].items():
+        say.hint(f"{fam:<24} {f['score']:.4f}")
+    slow = [r["rollout_id"] for t in report["tasks"] for r in t["rollouts"] if r.get("would_time_out_on_grader")]
+    if slow:
+        say.warn(f"{len(slow)} rollout(s) missed the per-step deadline often enough that the grader would fail them "
+                 f"(STEP_TIMEOUT): {slow[:5]}")
+    failed = [r for t in report["tasks"] for r in t["rollouts"] if r["state"] != "completed"]
+    for r in failed[:5]:
+        say.warn(f"{r['rollout_id']}: {r.get('error_code')} {r.get('error_message', '')}")
+    if report.get("seed_secret_is_default"):
+        say.hint(f"Episodes drawn with the public seed secret {DEFAULT_LOCAL_SEED_SECRET!r}; the grader draws "
+                 "its own, so expect a nearby score there, not the same one.")
+    say.hint(f"Report: {out / 'report.json'}")
+    return 0 if report["state"] == "completed" else 3
+
+
 def cmd_pack(args, say: Say) -> int:
     d = Path(args.dir)
     out = Path(args.out) if args.out else d.resolve().with_suffix(".zip")
@@ -405,7 +510,7 @@ def watch(client, sub_id, *, challenge: str, timeout: float, say: Say,
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="aicrowd-microduck",
-        description="Validate, pack and submit Microduck policies to the AIcrowd Microduck challenge.",
+        description="Validate, evaluate, pack and submit Microduck policies to the AIcrowd Microduck challenge.",
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
@@ -425,6 +530,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path", help="submission directory, or a .zip / .tar.gz of one")
     common(sp)
     sp.set_defaults(func=cmd_validate)
+
+    sp = sub.add_parser("evaluate", help="score a submission locally with the grader's own simulation",
+                        description="Simulate and score a submission on your machine with the evaluator's own "
+                                    "environments, policy runner, metrics and scoring. Same code and same seeds give "
+                                    "the grader's score; the grader draws its own seeds, so expect a nearby score "
+                                    "there. Needs the `sim` extra and the Microduck environments.")
+    sp.add_argument("path", help="submission directory, or a .zip / .tar.gz of one")
+    sp.add_argument("--only", help="comma-separated task ids and/or families (default: all 30 tasks)")
+    sp.add_argument("-n", "--num-rollouts", type=int, help="cap rollouts per task for a quick, partial score")
+    sp.add_argument("-j", "--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
+                    help="rollouts simulated at once, one process each (default: half the CPUs)")
+    sp.add_argument("-o", "--out", default="runs/local", help="output directory (default runs/local)")
+    sp.add_argument("--seed-secret", help="seed secret (default $MDEVAL_SEED_SECRET, else a public default)")
+    sp.add_argument("--competition", help=argparse.SUPPRESS)
+    common(sp)
+    sp.set_defaults(func=cmd_evaluate)
 
     sp = sub.add_parser("pack", help="zip a submission directory (files at the archive root)")
     sp.add_argument("dir", help="submission directory containing manifest.json")
