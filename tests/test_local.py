@@ -94,3 +94,17 @@ def test_evaluate_json_reports_early_failures(tmp_path, capsys):
     assert main(["evaluate", str(sub), "--only", "nope", "--json", "-o", str(tmp_path / "run")]) == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False and "unknown task or family" in payload["error"]
+
+
+def test_every_pinned_package_is_checked_at_run_time():
+    """stack_mismatches(stack_versions()) can only be clean if stack_versions() reports every pinned package."""
+    from aicrowd_microduck.local.local_eval import STACK_PACKAGES, stack_versions
+
+    assert set(cli.grader_stack()) <= set(STACK_PACKAGES)
+    assert set(cli.grader_stack()) <= set(stack_versions())
+
+
+def test_validate_names_unknown_manifest_keys(tmp_path, capsys):
+    sub = _submission(tmp_path, polices={"x": "y"})          # the classic typo of "policies"
+    assert main(["validate", str(sub)]) == 0
+    assert "polices" in capsys.readouterr().err

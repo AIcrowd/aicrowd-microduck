@@ -130,6 +130,10 @@ def _describe_report(report: dict[str, Any], say: Say) -> None:
     if report.get("unused_task_ids"):
         say.hint(f"note: the manifest names task(s) this competition does not run: "
                  f"{report['unused_task_ids']}")
+    unknown = (report.get("manifest") or {}).get("unknown_keys")
+    if unknown:
+        # carried, never rejected (upstream keeps extending the manifest), so a typo'd key is only caught here
+        say.hint(f"note: manifest field(s) the evaluator does not recognise, ignored: {list(unknown)}")
 
 
 class _Prepared:
@@ -325,7 +329,7 @@ def cmd_evaluate(args, say: Say) -> int:
         try:
             sub_dir = extract(path, sub_dir)
         except SubmissionRejected as e:
-            return fail(1, f"Rejected [{e.code.value}] {e.message}", error_code=e.code.value)
+            return fail(1, f"REJECTED [{e.code.value}] {e.message}", error_code=e.code.value)
     n_roll = sum(min(t.num_rollouts, args.num_rollouts or t.num_rollouts) for t in tasks)
     say.step(f"Evaluating {len(tasks)} task(s), {n_roll} rollout(s), {args.jobs} at a time -> {out}")
 
@@ -338,13 +342,18 @@ def cmd_evaluate(args, say: Say) -> int:
         report = evaluate_local(sub_dir, comp, out, only=only, jobs=args.jobs, seed_secret=args.seed_secret,
                                 num_rollouts=args.num_rollouts, on_result=progress)
     except SubmissionRejected as e:
-        return fail(1, f"Rejected [{e.code.value}] {e.message}", error_code=e.code.value)
+        return fail(1, f"REJECTED [{e.code.value}] {e.message}", error_code=e.code.value)
     if args.json:
         _emit_json({"ok": True, **{k: report[k] for k in ("score", "families", "partial", "state", "stack")},
                     "stack_mismatches": mismatched,
+                    "uncovered_tasks": report.get("uncovered_tasks", []),
                     "tasks": {t["task_id"]: t["score"] for t in report["tasks"]},
                     "report": str(out / "report.json")})
     say.ok(f"Score {report['score']:.4f}" + ("  (partial: not every task or rollout was run)" if report["partial"] else ""))
+    if report.get("uncovered_tasks"):
+        say.warn(f"The manifest routes no policy for {len(report['uncovered_tasks'])} task(s) outside this run "
+                 f"(e.g. {report['uncovered_tasks'][0]}); the grader would reject it as it stands. "
+                 "Route them, or set a default, before submitting.")
     for fam, f in report["families"].items():
         say.hint(f"{fam:<24} {f['score']:.4f}")
     rolls = [r for t in report["tasks"] for r in t["rollouts"]]

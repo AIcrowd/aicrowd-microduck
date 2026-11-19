@@ -74,7 +74,7 @@ SIM_ERROR = "SIM_ERROR"
 ROLLOUT_GRACE_S = 1200.0
 #: Packages whose versions decide a trajectory; recorded in the report.
 STACK_PACKAGES = ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "torch", "onnxruntime", "numpy", "scipy",
-                  "better-actuator-models")
+                  "mjviser", "trimesh", "better-actuator-models")
 
 
 def stack_versions() -> dict[str, str | None]:
@@ -362,8 +362,10 @@ def evaluate_local(submission_dir: str | Path, competition: str | Path | Competi
                    on_result: Callable[[dict[str, Any], int, int], None] | None = None) -> dict[str, Any]:
     """Validate the submission with the grader's checks, simulate every selected rollout, score, write report.json.
 
-    Raises ``SubmissionRejected`` before any simulation if the grader would reject the submission
-    (including SETUP_FAILED for a graph the runner cannot load). ``on_result(result, n_done, n_total)``
+    Raises ``SubmissionRejected`` before any simulation if the grader would reject the submission on the
+    selected tasks (including SETUP_FAILED for a graph the runner cannot load). Tasks outside ``only`` that
+    the manifest does not route are listed in the report's ``uncovered_tasks``: the grader would reject
+    the submission for them, so the CLI warns. ``on_result(result, n_done, n_total)``
     is called as each rollout finishes.
     """
     from aicrowd_microduck.local.onnx_policy import OnnxPolicy
@@ -374,9 +376,15 @@ def evaluate_local(submission_dir: str | Path, competition: str | Path | Competi
     comp = competition if isinstance(competition, CompetitionSpec) else load_competition(competition)
     tasks = select_tasks(comp, only)
     sub = Path(submission_dir).resolve()
-    # the full competition's coverage and action-scale checks, as the grader runs them before scoring
-    verdict = validate_submission(sub, tasks=comp.tasks)
+    # The grader's checks, on the tasks being run. The grader itself requires every task of the competition
+    # to be routed; a partial run (``only``) still scores the selected ones, so a participant can score the
+    # one family they have a policy for, and the tasks left unrouted are reported.
+    verdict = validate_submission(sub, tasks=tasks)
     manifest = verdict["manifest"]
+    selected = {t.task_id for t in tasks}
+    pol, default = manifest.get("policies") or {}, manifest.get("default")
+    uncovered = [t.task_id for t in comp.tasks if t.task_id not in selected
+                 and not (pol.get(t.task_id) or (t.family and pol.get(t.family)) or default)]
     # the grader's runner loads every graph once at setup; one that fails there fails the submission
     try:
         OnnxPolicy(str(sub), manifest).setup()
@@ -399,7 +407,7 @@ def evaluate_local(submission_dir: str | Path, competition: str | Path | Competi
     report = build_report(comp, tasks, results, submission_dir=str(sub), manifest=manifest,
                           graphs=verdict["graphs"], seed_secret_source=source,
                           seed_secret_is_default=seed_secret == DEFAULT_LOCAL_SEED_SECRET,
-                          partial=partial, selected=only or None, num_rollouts_override=num_rollouts,
+                          partial=partial, selected=only or None, uncovered_tasks=uncovered, num_rollouts_override=num_rollouts,
                           jobs=jobs, wall_s=time.time() - t0, created_at=t0, stack=stack_versions())
     with open(out / "report.json", "w") as f:
         json.dump(report, f, indent=1, default=str)
