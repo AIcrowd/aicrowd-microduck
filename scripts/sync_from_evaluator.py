@@ -165,7 +165,10 @@ def local_files(evaluator: Path) -> dict[Path, str]:
 
 # what decides a trajectory, read from the evaluator's lock: `evaluate` compares the installed stack
 # against it, and tests/test_local.py checks the `sim` extra pins exactly these
-STACK = ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "torch", "onnxruntime", "numpy", "scipy")
+STACK = ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "torch", "onnxruntime", "numpy", "scipy",
+         # not physics, but must match: mjviser >0.0.14 pulls mujoco-core 4.x, which overwrites mujoco 3.x's
+         # plugins in place; trimesh builds terrain meshes
+         "mjviser", "trimesh")
 
 
 def grader_stack(evaluator: Path) -> str:

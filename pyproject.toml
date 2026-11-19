@@ -31,6 +31,8 @@ sim = [
     "onnxruntime==1.29.0; python_version == '3.12'",
     "numpy==2.5.3; python_version == '3.12'",
     "scipy==1.18.1; python_version == '3.12'",
+    "mjviser==0.0.14; python_version == '3.12'",
+    "trimesh==4.12.2; python_version == '3.12'",
 ]
 
 [project.scripts]
