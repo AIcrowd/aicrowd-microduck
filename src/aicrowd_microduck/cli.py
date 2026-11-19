@@ -248,8 +248,17 @@ _SIM_HINT = ("`evaluate` simulates your policy, so it needs the simulator and th
              "Microduck environment package.")
 
 
-def _check_simulator(env_id: str) -> Optional[str]:
-    """None if ``env_id`` can be built here, else what is missing (checked before spawning any rollout)."""
+def grader_stack() -> dict[str, str]:
+    return json.loads((Path(__file__).parent / "local" / "grader_stack.json").read_text())
+
+
+def stack_mismatches(installed: dict[str, Any]) -> list[str]:
+    """``name installed != grader`` for each package of the grader's stack that differs here."""
+    return [f"{n} {installed.get(n)} (grader {v})" for n, v in grader_stack().items() if installed.get(n) != v]
+
+
+def _check_simulator(env_ids: list[str]) -> Optional[str]:
+    """None if every env id can be built here, else what is missing (checked before spawning any rollout)."""
     try:
         import mujoco  # noqa: F401
         import yaml  # noqa: F401
@@ -259,10 +268,11 @@ def _check_simulator(env_id: str) -> Optional[str]:
     from .local.env_runner import _ensure_tasks_registered
 
     _ensure_tasks_registered()
-    try:
-        load_env_cfg(env_id, play=False)
-    except Exception as e:  # noqa: BLE001
-        return f"environment {env_id!r} is not registered ({type(e).__name__}: {e})"
+    for env_id in env_ids:
+        try:
+            load_env_cfg(env_id, play=False)
+        except Exception as e:  # noqa: BLE001
+            return f"environment {env_id!r} is not registered ({type(e).__name__}: {e})"
     return None
 
 
@@ -270,29 +280,40 @@ def cmd_evaluate(args, say: Say) -> int:
     """Score a submission locally with the grader's own simulation, policy runner and metrics."""
     import shutil
 
+    def fail(code: int, msg: str, hint: Optional[str] = None, **extra: Any) -> int:
+        if args.json:
+            _emit_json({"ok": False, "error": msg, **extra})
+        say.warn(msg)
+        if hint:
+            say.hint(hint)
+        return code
+
     path = Path(args.path)
     out = Path(args.out)
+    if args.num_rollouts is not None and args.num_rollouts < 1:
+        return fail(2, "--num-rollouts must be at least 1")
     comp_path = Path(args.competition) if args.competition else _local_competition_path()
     try:
-        from .local.local_eval import DEFAULT_LOCAL_SEED_SECRET, evaluate_local, select_tasks
+        from .local.local_eval import DEFAULT_LOCAL_SEED_SECRET, evaluate_local, select_tasks, stack_versions
         from .local.tasks import load_competition
     except ImportError as e:
-        say.warn(f"cannot load the local scorer: {e}")
-        say.hint(_SIM_HINT)
-        return 2
+        return fail(2, f"cannot load the local scorer: {e}", _SIM_HINT)
     from .submission import SubmissionRejected
 
     comp = load_competition(comp_path)
+    only = args.only.split(",") if args.only else None
     try:
-        tasks = select_tasks(comp, args.only.split(",") if args.only else None)
+        tasks = select_tasks(comp, only)
     except ValueError as e:
-        say.warn(str(e))
-        return 2
-    missing = _check_simulator(tasks[0].env_id)
+        return fail(2, str(e))
+    missing = _check_simulator(sorted({t.env_id for t in tasks}))
     if missing:
-        say.warn(f"cannot simulate: {missing}")
-        say.hint(_SIM_HINT)
-        return 2
+        return fail(2, f"cannot simulate: {missing}", _SIM_HINT)
+    mismatched = stack_mismatches(stack_versions())
+    if mismatched:
+        say.warn("This is not the grader's software stack, so trajectories (and scores) can differ from "
+                 "the grader's even on the same episodes: " + ", ".join(mismatched))
+        say.hint('Install the pinned stack with `pip install "aicrowd-microduck[sim]"` on Python 3.12.')
 
     sub_dir = path
     if path.is_file():
@@ -304,8 +325,7 @@ def cmd_evaluate(args, say: Say) -> int:
         try:
             sub_dir = extract(path, sub_dir)
         except SubmissionRejected as e:
-            say.warn(f"Rejected [{e.code.value}] {e.message}")
-            return 1
+            return fail(1, f"Rejected [{e.code.value}] {e.message}", error_code=e.code.value)
     n_roll = sum(min(t.num_rollouts, args.num_rollouts or t.num_rollouts) for t in tasks)
     say.step(f"Evaluating {len(tasks)} task(s), {n_roll} rollout(s), {args.jobs} at a time -> {out}")
 
@@ -315,34 +335,34 @@ def cmd_evaluate(args, say: Say) -> int:
         say.hint(f"[{n}/{total}] {r['rollout_id']:<32} {tail}")
 
     try:
-        report = evaluate_local(sub_dir, comp, out, only=args.only.split(",") if args.only else None,
-                                jobs=args.jobs, seed_secret=args.seed_secret, num_rollouts=args.num_rollouts,
-                                on_result=progress)
+        report = evaluate_local(sub_dir, comp, out, only=only, jobs=args.jobs, seed_secret=args.seed_secret,
+                                num_rollouts=args.num_rollouts, on_result=progress)
     except SubmissionRejected as e:
-        if args.json:
-            _emit_json({"ok": False, "error_code": e.code.value, "message": e.message})
-        say.warn(f"Rejected [{e.code.value}] {e.message}")
-        return 1
+        return fail(1, f"Rejected [{e.code.value}] {e.message}", error_code=e.code.value)
     if args.json:
-        _emit_json({"ok": True, **{k: report[k] for k in ("score", "families", "partial", "state")},
+        _emit_json({"ok": True, **{k: report[k] for k in ("score", "families", "partial", "state", "stack")},
+                    "stack_mismatches": mismatched,
                     "tasks": {t["task_id"]: t["score"] for t in report["tasks"]},
                     "report": str(out / "report.json")})
     say.ok(f"Score {report['score']:.4f}" + ("  (partial: not every task or rollout was run)" if report["partial"] else ""))
     for fam, f in report["families"].items():
         say.hint(f"{fam:<24} {f['score']:.4f}")
-    slow = [r["rollout_id"] for t in report["tasks"] for r in t["rollouts"] if r.get("would_time_out_on_grader")]
-    if slow:
-        say.warn(f"{len(slow)} rollout(s) missed the per-step deadline often enough that the grader would fail them "
-                 f"(STEP_TIMEOUT): {slow[:5]}")
-    failed = [r for t in report["tasks"] for r in t["rollouts"] if r["state"] != "completed"]
-    for r in failed[:5]:
+    rolls = [r for t in report["tasks"] for r in t["rollouts"]]
+    late = [r["rollout_id"] for r in rolls if r.get("n_step_timeouts")]
+    if late:
+        say.warn(f"{len(late)} rollout(s) missed the per-step deadline and held the previous action, as the grader "
+                 f"would: {late[:5]}")
+    near = [r["rollout_id"] for r in rolls if r.get("near_step_deadline") and not r.get("n_step_timeouts")]
+    if near:
+        say.hint(f"note: {len(near)} rollout(s) took over half the per-step deadline on some step; the grader's "
+                 "machine may be slower")
+    for r in [r for r in rolls if r["state"] != "completed"][:5]:
         say.warn(f"{r['rollout_id']}: {r.get('error_code')} {r.get('error_message', '')}")
     if report.get("seed_secret_is_default"):
         say.hint(f"Episodes drawn with the public seed secret {DEFAULT_LOCAL_SEED_SECRET!r}; the grader draws "
                  "its own, so expect a nearby score there, not the same one.")
     say.hint(f"Report: {out / 'report.json'}")
     return 0 if report["state"] == "completed" else 3
-
 
 def cmd_pack(args, say: Say) -> int:
     d = Path(args.dir)
@@ -539,8 +559,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path", help="submission directory, or a .zip / .tar.gz of one")
     sp.add_argument("--only", help="comma-separated task ids and/or families (default: all 30 tasks)")
     sp.add_argument("-n", "--num-rollouts", type=int, help="cap rollouts per task for a quick, partial score")
-    sp.add_argument("-j", "--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
-                    help="rollouts simulated at once, one process each (default: half the CPUs)")
+    sp.add_argument("-j", "--jobs", type=int, default=max(1, min(4, (os.cpu_count() or 2) // 2)),
+                    help="rollouts simulated at once, one process each (default: half the CPUs, at most 4)")
     sp.add_argument("-o", "--out", default="runs/local", help="output directory (default runs/local)")
     sp.add_argument("--seed-secret", help="seed secret (default $MDEVAL_SEED_SECRET, else a public default)")
     sp.add_argument("--competition", help=argparse.SUPPRESS)

@@ -103,7 +103,22 @@ def _target(sub: str, name: str) -> str:
     return f"aicrowd_microduck.local.{name}"
 
 
+def _vendored_names() -> set[str]:
+    return set(LOCAL_MODULES.values()) | {"protocol", "metrics_v2"}
+
+
 def rewrite_imports(src: str, origin: str) -> str:
+    vendored = _vendored_names()
+    missing = sorted({m.group(2) for m in _MODULE_RE.finditer(src)
+                      if (m.group(1), m.group(2)) != ("common", "submission") and m.group(2) not in vendored})
+    # `from mdeval.common import x, y` names modules too
+    for m in re.finditer(r"\bfrom mdeval\.(?:common|server) import ([\w, ]+)", src):
+        for name in (n.strip().split(" as ")[0] for n in m.group(1).split(",")):
+            if name == "submission" or name not in vendored:
+                missing.append(name)
+    if missing:
+        raise SystemExit(f"{origin} imports evaluator module(s) {sorted(set(missing))} that are not vendored: "
+                         "add them to LOCAL_MODULES (or keep local_eval's imports to vendored modules)")
     out = _MODULE_RE.sub(lambda m: _target(m.group(1), m.group(2)), src)
     out = _FROM_PKG_RE.sub("from aicrowd_microduck.local import", out)
     left = [ln for ln in out.splitlines() if re.search(r"\b(from|import) mdeval\b", ln)]
@@ -140,11 +155,35 @@ def local_files(evaluator: Path) -> dict[Path, str]:
     for f in sorted((evaluator / "src/mdeval/server/metrics_v2").glob("*.py")):
         origin = str(f.relative_to(evaluator))
         files[LOCAL / "metrics_v2" / f.name] = rewrite_imports(f.read_text(), origin)
+    files[LOCAL / "grader_stack.json"] = grader_stack(evaluator)
     comp = evaluator / COMPETITION
     files[LOCAL / "competition" / comp.name] = comp.read_text()
     for entry in yaml_entries(comp):
         files[LOCAL / "competition" / entry] = (comp.parent / entry).read_text()
     return files
+
+
+# what decides a trajectory, read from the evaluator's lock: `evaluate` compares the installed stack
+# against it, and tests/test_local.py checks the `sim` extra pins exactly these
+STACK = ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "torch", "onnxruntime", "numpy", "scipy")
+
+
+def grader_stack(evaluator: Path) -> str:
+    import tomllib
+
+    lock = tomllib.loads((evaluator / "uv.lock").read_text())
+    found: dict[str, str] = {}
+    for pkg in lock["package"]:
+        name, version = pkg["name"], pkg["version"]
+        src = pkg.get("source", {})
+        if name in STACK and src.get("registry") == "https://pypi.org/simple":
+            if found.get(name, version) != version:
+                raise SystemExit(f"evaluator lock has two PyPI versions of {name}: {found[name]}, {version}")
+            found[name] = version
+    absent = sorted(set(STACK) - set(found))
+    if absent:
+        raise SystemExit(f"evaluator lock has no PyPI version of {absent}")
+    return json.dumps({n: found[n] for n in STACK}, indent=1) + "\n"
 
 
 def yaml_entries(comp_path: Path) -> list[str]:
@@ -165,7 +204,7 @@ def main() -> int:
               **local_files(args.evaluator)}
     # a vendored local/ file the evaluator no longer has is drift too (a deleted metric module)
     stale = sorted(p for p in LOCAL.rglob("*") if p.is_file() and p not in wanted
-                   and "__pycache__" not in p.parts)
+                   and "__pycache__" not in p.parts and not p.name.startswith("."))
     drifted = [p for p, text in wanted.items() if not p.exists() or p.read_text() != text]
     if args.check:
         for p in drifted:

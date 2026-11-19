@@ -10,13 +10,22 @@ same pieces in-process:
     EnvRunner (env build, reset, step)  ->  OnnxPolicy (graph per task, LSTM state lifecycle)
     RolloutRecorder -> RolloutTrace     ->  metrics.compute  ->  scoring (task, family, session)
 
-Every one of those is the grader's own code, imported, not reimplemented. What is left out: the
-per-step deadline is measured and reported but never enforced (a laptop is not the grader's
-machine), there is no retry of our own failures, and nothing is rendered.
+Every one of those is the grader's own code, imported, not reimplemented. The grader's per-step
+rules are applied as it applies them: an ``act()`` slower than ``step_deadline_s`` is replaced by the
+previous action, and more than ``max_step_timeouts`` of those fail the rollout (STEP_TIMEOUT). Those
+timings are this machine's, so a policy near the deadline can behave differently on the grader.
+A rollout process that dies is POLICY_CRASHED and one that stops making progress is STEP_TIMEOUT,
+both the participant's (scored 0), as on the grader; a graph that will not load fails the whole
+submission (SETUP_FAILED). Left out: retries of our own failures, rendering.
+
+**The software stack matters as much as the code.** A different mujoco, torch, warp or onnxruntime
+build gives a different trajectory. ``stack_versions()`` is recorded in the report so a local score
+can be checked against the grader's stack (the public CLI pins it and warns on a mismatch).
 
 Each rollout runs in a fresh spawned process (one simulator per process, as on the grader's
 ``env_proc``): mjlab, torch and warp draw from process-global RNGs, so a fresh process is what makes
 a rollout's result independent of what ran before it and of ``jobs``, the number run concurrently.
+A process that dies or hangs costs only its own rollout.
 
 **Seeds.** Competition tasks use ``seed_mode: secret``: each rollout's seed is an HMAC of a secret
 and the task id. The grader's secret is not public, so a local run uses ``MDEVAL_SEED_SECRET`` or a
@@ -35,8 +44,6 @@ import logging
 import os
 import time
 import traceback
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 from typing import Any, Callable
 
@@ -58,10 +65,31 @@ DEFAULT_LOCAL_SEED_SECRET = "microduck-local"
 # left out of the mean, as on the grader.
 SUCCESS = "SUCCESS"
 POLICY_EXCEPTION = "POLICY_EXCEPTION"
-ACTION_SHAPE_MISMATCH = "ACTION_SHAPE_MISMATCH"
 ACTION_NOT_FINITE = "ACTION_NOT_FINITE"
+STEP_TIMEOUT = "STEP_TIMEOUT"
+POLICY_CRASHED = "POLICY_CRASHED"
 SIM_ERROR = "SIM_ERROR"
-LOCAL_WORKER_CRASHED = "LOCAL_WORKER_CRASHED"
+#: Seconds a rollout may take beyond its step budget (env build on a cold Warp cache, metrics) before
+#: it is declared hung. The step budget itself is max_steps x step_deadline_s.
+ROLLOUT_GRACE_S = 1200.0
+#: Packages whose versions decide a trajectory; recorded in the report.
+STACK_PACKAGES = ("mjlab", "mujoco", "mujoco-warp", "warp-lang", "torch", "onnxruntime", "numpy", "scipy",
+                  "better-actuator-models")
+
+
+def stack_versions() -> dict[str, str | None]:
+    """Installed versions of the packages that decide a trajectory, plus the interpreter and machine."""
+    import platform
+    from importlib import metadata
+
+    out: dict[str, str | None] = {"python": platform.python_version(), "machine": platform.machine(),
+                                  "system": platform.system()}
+    for name in STACK_PACKAGES:
+        try:
+            out[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            out[name] = None
+    return out
 
 
 # ------------------------------------------------------------------------------ selection
@@ -120,7 +148,9 @@ def run_rollout(entry: dict[str, Any], submission_dir: str, manifest: dict[str, 
     out = Path(out_dir)
     t_start = time.time()
 
-    # The policy first: a graph that will not load is the submission's failure, not the simulator's.
+    # The policy first. evaluate_local already loaded every graph in the parent (a graph that will not
+    # load is SETUP_FAILED for the whole submission, as on the grader), so this only fails if a graph
+    # loads in one process and not another.
     try:
         policy = OnnxPolicy(submission_dir, manifest)
         policy.setup()
@@ -134,12 +164,14 @@ def run_rollout(entry: dict[str, Any], submission_dir: str, manifest: dict[str, 
     except Exception as e:  # noqa: BLE001
         return _failed(entry, SIM_ERROR, f"env build failed: {e!r}", traceback.format_exc())
 
+    # Always this run's own model: an .mjb left in a reused out dir may come from another env version,
+    # and the kinematics metrics read geometry from it. Seeds are distinct per rollout, so no two
+    # rollouts of one run write the same file.
     mjb = out / "assets" / f"model_{spec.task_id}_{seed}.mjb"
-    if not mjb.exists():
-        mjb.parent.mkdir(parents=True, exist_ok=True)
-        tmp = f"{mjb}.{os.getpid()}.tmp"
-        mujoco.mj_saveModel(runner.mj_model, tmp, None)
-        os.replace(tmp, mjb)
+    mjb.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f"{mjb}.{os.getpid()}.tmp"
+    mujoco.mj_saveModel(runner.mj_model, tmp, None)
+    os.replace(tmp, mjb)
     desc = runner.describe()
     recorder = RolloutRecorder(meta={
         "session_id": "local", "rollout_id": entry["rollout_id"], "agent_idx": 0, "n_agents": 1,
@@ -151,10 +183,12 @@ def run_rollout(entry: dict[str, Any], submission_dir: str, manifest: dict[str, 
 
     K, act_dim = spec.num_envs, runner.act_dim
     done_mask: np.ndarray | None = None
-    policy_wall = 0.0
-    slow_steps = 0
+    last_action = np.zeros((K, act_dim), dtype=np.float32)
+    policy_wall = policy_max = 0.0
+    n_timeouts = 0
     try:
         while True:
+            # worker/loop.py's rules: a late act() is replaced by the previous action, too many fail the rollout
             t0 = time.perf_counter()
             try:
                 action = np.asarray(policy.act(obs, done=done_mask), dtype=np.float32)
@@ -163,11 +197,20 @@ def run_rollout(entry: dict[str, Any], submission_dir: str, manifest: dict[str, 
                                traceback.format_exc())
             wall = time.perf_counter() - t0
             policy_wall += wall
-            slow_steps += int(wall > spec.step_deadline_s)
-            if action.shape != (K, act_dim):
-                return _failed(entry, ACTION_SHAPE_MISMATCH, f"policy returned {action.shape}, expected {(K, act_dim)}")
-            if not np.all(np.isfinite(action)):
-                return _failed(entry, ACTION_NOT_FINITE, f"non-finite action at step {runner.step_count}")
+            policy_max = max(policy_max, wall)
+            if wall > spec.step_deadline_s:
+                n_timeouts += 1
+                if n_timeouts > spec.max_step_timeouts:
+                    return _failed(entry, STEP_TIMEOUT, f"{n_timeouts} step deadline misses (limit "
+                                   f"{spec.max_step_timeouts}, {spec.step_deadline_s}s each) on this machine")
+                action = last_action
+            else:
+                if action.shape != (K, act_dim):
+                    # the grader's child raises on this, which it reports as POLICY_EXCEPTION
+                    return _failed(entry, POLICY_EXCEPTION, f"policy returned {action.shape}, expected {(K, act_dim)}")
+                if not np.all(np.isfinite(action)):
+                    return _failed(entry, ACTION_NOT_FINITE, f"non-finite action at step {runner.step_count}")
+                last_action = action
             t_recv = time.time()
             rec = runner.step(action)
             recorder.add(rec, t_recv, time.time(), wall)
@@ -183,7 +226,7 @@ def run_rollout(entry: dict[str, Any], submission_dir: str, manifest: dict[str, 
 
     done_step = runner.done_step
     trace = recorder.finish(np.where(done_step > 0, done_step - 1, -1),
-                            extra_meta={"n_step_timeouts": 0, "policy_wall_s_total": policy_wall})
+                            extra_meta={"n_step_timeouts": n_timeouts, "policy_wall_s_total": policy_wall})
     if save_trace:
         trace.save(out / "rollouts" / entry["rollout_id"])
     try:
@@ -193,10 +236,9 @@ def run_rollout(entry: dict[str, Any], submission_dir: str, manifest: dict[str, 
     mets["primary"] = mets.get(spec.primary_metric)
     return {**{k: v for k, v in entry.items() if k != "task"}, "state": "completed", "error_code": SUCCESS,
             "metrics": mets, "n_steps": int(runner.step_count), "policy_wall_s_total": policy_wall,
-            "n_slow_steps": slow_steps,
-            # the grader holds the previous action on a missed deadline and fails the rollout after
-            # max_step_timeouts misses; on this machine that would have happened if this is True
-            "would_time_out_on_grader": slow_steps > spec.max_step_timeouts,
+            "policy_step_max_s": policy_max, "n_step_timeouts": n_timeouts,
+            # within a factor 2 of the deadline: the grader's machine and transport may tip it over
+            "near_step_deadline": policy_max > 0.5 * spec.step_deadline_s,
             "wall_s": time.time() - t_start}
 
 
@@ -236,23 +278,112 @@ def build_report(comp: CompetitionSpec, tasks: list[TaskSpec], results: list[dic
 
 
 # ------------------------------------------------------------------------------ evaluate
+def _child(conn, entry: dict[str, Any], submission_dir: str, manifest: dict[str, Any], out_dir: str,
+           save_trace: bool) -> None:  # pragma: no cover -- runs in the rollout process
+    _worker_init()
+    try:
+        res = run_rollout(entry, submission_dir, manifest, out_dir, save_trace)
+    except BaseException as e:  # noqa: BLE001 -- run_rollout catches what it attributes; this is the rest
+        res = _failed(entry, SIM_ERROR, f"rollout raised outside the step loop: {e!r}", traceback.format_exc())
+    conn.send(res)
+    conn.close()
+
+
+def rollout_budget_s(task: dict[str, Any]) -> float:
+    spec = _dataclass_from(TaskSpec, task)
+    return spec.max_steps * spec.step_deadline_s + ROLLOUT_GRACE_S
+
+
+def run_plan(plan: list[dict[str, Any]], submission_dir: str, manifest: dict[str, Any], out_dir: str, *,
+             jobs: int = 1, save_traces: bool = True,
+             on_result: Callable[[dict[str, Any], int, int], None] | None = None,
+             target: Callable[..., None] | None = None) -> list[dict[str, Any]]:
+    """Run every rollout of ``plan`` in its own spawned process, ``jobs`` at a time.
+
+    A process that dies is that rollout's POLICY_CRASHED (on the grader the policy runs in its own
+    process and a crash there is the participant's; here policy and simulator share one, and the
+    policy is by far the likelier cause). One that outlives its budget is killed as STEP_TIMEOUT.
+    Neither affects any other rollout. ``target`` replaces the rollout function (tests).
+    """
+    import multiprocessing as mp
+    from multiprocessing.connection import wait
+
+    ctx = mp.get_context("spawn")
+    pending = list(plan)
+    running: dict[Any, tuple[Any, Any, dict[str, Any], float]] = {}   # sentinel -> (proc, conn, entry, deadline)
+    results: list[dict[str, Any]] = []
+
+    def finish(res: dict[str, Any]) -> None:
+        results.append(res)
+        if on_result:
+            on_result(res, len(results), len(plan))
+
+    try:
+        while pending or running:
+            while pending and len(running) < max(1, int(jobs)):
+                entry = pending.pop(0)
+                parent, child = ctx.Pipe(duplex=False)
+                proc = ctx.Process(target=target or _child, args=(child, entry, submission_dir, manifest, out_dir, save_traces),
+                                   name=f"rollout-{entry['rollout_id']}", daemon=True)
+                proc.start()
+                child.close()
+                running[proc.sentinel] = (proc, parent, entry, time.time() + rollout_budget_s(entry["task"]))
+            wait(list(running) + [c for _, c, _, _ in running.values()], timeout=5.0)
+            for key, (proc, conn, entry, deadline) in list(running.items()):
+                res = None
+                if conn.poll():
+                    try:
+                        res = conn.recv()
+                    except EOFError:
+                        res = None
+                if res is None and proc.is_alive() and time.time() < deadline:
+                    continue
+                if res is None and proc.is_alive():
+                    proc.kill()
+                    res = _failed(entry, STEP_TIMEOUT, f"rollout made no progress within {rollout_budget_s(entry['task']):.0f}s; "
+                                  "killed (a policy that never returns)")
+                proc.join(timeout=30)
+                if res is None:
+                    res = _failed(entry, POLICY_CRASHED, f"rollout process died (exit code {proc.exitcode}); on the grader "
+                                  "a crash while running the policy scores 0")
+                conn.close()
+                del running[key]
+                finish(res)
+    finally:
+        for proc, conn, _, _ in running.values():
+            proc.kill()
+            conn.close()
+    return results
+
+
 def evaluate_local(submission_dir: str | Path, competition: str | Path | CompetitionSpec, out_dir: str | Path, *,
                    only: list[str] | None = None, jobs: int = 1, seed_secret: str | None = None,
                    num_rollouts: int | None = None, save_traces: bool = True,
                    on_result: Callable[[dict[str, Any], int, int], None] | None = None) -> dict[str, Any]:
     """Validate the submission with the grader's checks, simulate every selected rollout, score, write report.json.
 
-    Raises ``SubmissionRejected`` before any simulation if the grader would reject the submission.
-    ``on_result(result, n_done, n_total)`` is called as each rollout finishes.
+    Raises ``SubmissionRejected`` before any simulation if the grader would reject the submission
+    (including SETUP_FAILED for a graph the runner cannot load). ``on_result(result, n_done, n_total)``
+    is called as each rollout finishes.
     """
-    from aicrowd_microduck.submission import validate_submission
+    from aicrowd_microduck.local.onnx_policy import OnnxPolicy
+    from aicrowd_microduck.submission import SubmissionErrorCode, SubmissionRejected, validate_submission
 
+    if num_rollouts is not None and int(num_rollouts) < 1:
+        raise ValueError("num_rollouts must be at least 1")
     comp = competition if isinstance(competition, CompetitionSpec) else load_competition(competition)
     tasks = select_tasks(comp, only)
     sub = Path(submission_dir).resolve()
     # the full competition's coverage and action-scale checks, as the grader runs them before scoring
     verdict = validate_submission(sub, tasks=comp.tasks)
     manifest = verdict["manifest"]
+    # the grader's runner loads every graph once at setup; one that fails there fails the submission
+    try:
+        OnnxPolicy(str(sub), manifest).setup()
+    except SubmissionRejected:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise SubmissionRejected(SubmissionErrorCode.SETUP_FAILED, f"policy setup failed: {e!r}"[:500]) from e
 
     source = "argument" if seed_secret else ("MDEVAL_SEED_SECRET" if os.environ.get("MDEVAL_SEED_SECRET") else "default")
     seed_secret = seed_secret or os.environ.get("MDEVAL_SEED_SECRET") or DEFAULT_LOCAL_SEED_SECRET
@@ -260,32 +391,16 @@ def evaluate_local(submission_dir: str | Path, competition: str | Path | Competi
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    import multiprocessing as mp
-
-    results: list[dict[str, Any]] = []
     t0 = time.time()
-    ctx = mp.get_context("spawn")
-    with ProcessPoolExecutor(max_workers=max(1, int(jobs)), mp_context=ctx, initializer=_worker_init,
-                             max_tasks_per_child=1) as pool:
-        futs = {pool.submit(run_rollout, e, str(sub), manifest, str(out), save_traces): e for e in plan}
-        for fut in as_completed(futs):
-            entry = futs[fut]
-            try:
-                res = fut.result()
-            except BrokenProcessPool as e:
-                res = _failed(entry, LOCAL_WORKER_CRASHED, f"rollout process died: {e!r}")
-            except Exception as e:  # noqa: BLE001
-                res = _failed(entry, LOCAL_WORKER_CRASHED, f"rollout process failed: {e!r}", traceback.format_exc())
-            results.append(res)
-            if on_result:
-                on_result(res, len(results), len(plan))
+    results = run_plan(plan, str(sub), manifest, str(out), jobs=jobs, save_traces=save_traces, on_result=on_result)
 
-    partial = bool(only) or num_rollouts is not None
+    capped = num_rollouts is not None and any(int(num_rollouts) < t.num_rollouts for t in tasks)
+    partial = len(tasks) < len(comp.tasks) or capped
     report = build_report(comp, tasks, results, submission_dir=str(sub), manifest=manifest,
                           graphs=verdict["graphs"], seed_secret_source=source,
                           seed_secret_is_default=seed_secret == DEFAULT_LOCAL_SEED_SECRET,
                           partial=partial, selected=only or None, num_rollouts_override=num_rollouts,
-                          jobs=jobs, wall_s=time.time() - t0, created_at=t0)
+                          jobs=jobs, wall_s=time.time() - t0, created_at=t0, stack=stack_versions())
     with open(out / "report.json", "w") as f:
         json.dump(report, f, indent=1, default=str)
     return report
